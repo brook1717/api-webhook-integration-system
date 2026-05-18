@@ -1,11 +1,13 @@
 import asyncio
 from uuid import UUID
 
+import httpx
+from tenacity import RetryError
 from sqlalchemy.orm import Session
 
 from app.database.db import SessionLocal
 from app.database.models import WebhookEvent, APIRequestLog
-from app.services.integrations import send_to_slack
+from app.services.integrations import send_to_slack, SlackAPIError
 
 
 def process_order_event(event_id: UUID, payload: dict):
@@ -17,8 +19,24 @@ def process_order_event(event_id: UUID, payload: dict):
         f"• Items: {len(payload.get('items', []))} item(s)"
     )
 
-    status_code, response_body = asyncio.run(_send(formatted_data))
-    success = 200 <= status_code < 300
+    status_code = 0
+    response_body: dict = {}
+    success = False
+
+    try:
+        status_code, response_body = asyncio.run(_send(formatted_data))
+        success = 200 <= status_code < 300
+    except RetryError as exc:
+        original = exc.last_attempt.exception()
+        if isinstance(original, SlackAPIError):
+            status_code = original.status_code
+            response_body = original.body
+        elif isinstance(original, (httpx.NetworkError, httpx.TimeoutException)):
+            response_body = {"error": str(original)}
+        else:
+            response_body = {"error": str(original)}
+    except Exception as exc:
+        response_body = {"error": str(exc)}
 
     db: Session = SessionLocal()
     try:
